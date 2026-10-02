@@ -1,0 +1,59 @@
+name: Refresh AIS references
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Same pandoc as the snapshot, so a refresh only changes what gpsd changed.
+      # Bump it by running scripts/ais/refresh.py --apply locally with a newer pandoc.
+      - name: Install pandoc recorded in SOURCE.json
+        run: |
+          v=$(python3 -c 'import json; print(json.load(open("skills/ais/references/SOURCE.json"))["converter"].split()[1])')
+          curl -fsSL -o "$RUNNER_TEMP/pandoc.deb" "https://github.com/jgm/pandoc/releases/download/$v/pandoc-$v-1-amd64.deb"
+          sudo dpkg -i "$RUNNER_TEMP/pandoc.deb"
+
+      - name: Dry run
+        id: dry
+        run: |
+          python3 scripts/ais/refresh.py | tee "$RUNNER_TEMP/dry-run.txt"
+          if grep -q '^No changes against' "$RUNNER_TEMP/dry-run.txt"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "sha=$(sed -n 's/^HTML sha256: //p' "$RUNNER_TEMP/dry-run.txt")" >> "$GITHUB_OUTPUT"
+            { echo 'summary<<DRYRUN_EOF'; cat "$RUNNER_TEMP/dry-run.txt"; echo 'DRYRUN_EOF'; } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply
+        if: steps.dry.outputs.changed == 'true'
+        env:
+          SHA: ${{ steps.dry.outputs.sha }}
+        run: python3 scripts/ais/refresh.py --apply "$SHA"
+
+      - name: Open pull request
+        if: steps.dry.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: refresh/ais-references
+          add-paths: skills/ais/references
+          commit-message: Refresh AIS references from gpsd.io
+          title: Refresh AIS references from gpsd.io
+          body: |
+            `scripts/ais/refresh.py` dry run against https://gpsd.io/AIVDM.html:
+
+            ```
+            ${{ steps.dry.outputs.summary }}
+            ```
+
+            Applied with the hash above; review the diff before merging.

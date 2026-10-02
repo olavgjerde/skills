@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # npx skills copies only the skill directory, so each skill carries its own copy of the MIT notice.
+      - name: Skill LICENSE copies match the root LICENSE
+        run: |
+          for f in skills/*/LICENSE; do
+            cmp LICENSE "$f" || { echo "::error file=$f::differs from LICENSE"; exit 1; }
+          done
+      - name: Scripts compile
+        run: python3 -m compileall -q scripts

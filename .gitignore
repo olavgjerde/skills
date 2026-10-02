@@ -1,0 +1,4 @@
+.staging/
+.references-old/
+.DS_Store
+__pycache__/

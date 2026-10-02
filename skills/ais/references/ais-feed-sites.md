@@ -9,5 +9,3 @@ Most sites that advertise "live" AIS feeds actually give you a map display throu
 - [AIS Hub](http://aishub.net): Share alike. You contribute a feed, you get back all feeds.
 
 - [AIS Live](http://maritime.ihs.com): Subscription access to real-time data. No longer has free access even to delayed data.
-
-forced change

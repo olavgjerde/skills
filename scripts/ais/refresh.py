@@ -24,6 +24,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -37,22 +38,36 @@ BACKUP = SKILL_DIR / ".references-old"
 SOURCE_JSON = "SOURCE.json"
 # SOURCE.json fields that change on every run; ignored when comparing builds.
 VOLATILE = {"fetched_at"}
-
-# H2 sections whose H3 children each get their own file (one file per message type).
-SPLIT_H3_UNDER = {"AIS Payload Interpretation"}
+MESSAGE_TYPES = range(1, 28)
 
 HEADING_LINK = re.compile(r"^(#{1,6}) \[(.+)\]\(#([^)\s]+)\)\s*$")
 HEADING_PLAIN = re.compile(r"^(#{1,6}) (.+?)\s*$")
 TABLE_SEP = re.compile(r"^\|( ?:?-{3,}:? ?\|)+ *$")
 FOOTER_VERSION = re.compile(r"^Version ([\d.]+)\\?$")
 FOOTER_UPDATED = re.compile(r"^Last updated (.+)$")
+# Message-type headings; each H3 one gets its own file.
 TYPE_HEADING = re.compile(r"^Types? ((?:\d+|,|and|\s)+)")
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+IN_PAGE_LINK = re.compile(r"\]\(#([^)\s]+)\)")
 SAME_LAYOUT = re.compile(r"[Ii]dentical to (?:message|a type) (\d+)")
-# pandoc appends the table's attributes to its caption: "Table 12. Cargo Unit Codes {.tableblock ...}".
-CAPTION = re.compile(r"^(Table \d+\..*?) \{\.tableblock[^}]*\}\s*$")
 # Defining sentence of a type 6/8 sub-message: "A message 8 subtype. DAC = 001 FID = 31. ..."
 DAC_FID = re.compile(r"\bDAC = (\d+(?: or \d+)*) FID = (\d+)\b")
+
+# The GFM writer prints a table caption (with the table's attributes) below the
+# table; put it above, where the HTML shows it, so it cannot read as the start
+# of whatever follows the table.
+CAPTION_FILTER = """
+function Table(t)
+  if #t.caption.long == 0 then return nil end
+  local out = pandoc.List()
+  for _, b in ipairs(t.caption.long) do
+    out:insert(b.t == "Plain" and pandoc.Para(b.content) or b)
+  end
+  t.caption = {long = {}}
+  out:insert(t)
+  return out
+end
+"""
 
 
 def fetch(url):
@@ -68,10 +83,13 @@ def fetch(url):
 
 def to_gfm(html_bytes):
     try:
-        out = subprocess.run(
-            ["pandoc", "-f", "html", "-t", "gfm-raw_html", "--wrap=none"],
-            input=html_bytes, capture_output=True, check=True,
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            lua = Path(tmp, "captions.lua")  # pandoc reads filters only from files
+            lua.write_text(CAPTION_FILTER, encoding="utf-8")
+            out = subprocess.run(
+                ["pandoc", "-f", "html", "-t", "gfm-raw_html", "--wrap=none", "--lua-filter", lua],
+                input=html_bytes, capture_output=True, check=True,
+            )
     except FileNotFoundError:
         sys.exit("pandoc not found: install it (brew install pandoc / apt install pandoc); nothing written.")
     except subprocess.CalledProcessError as e:
@@ -81,7 +99,7 @@ def to_gfm(html_bytes):
 
 
 def pandoc_version():
-    out = subprocess.run(["pandoc", "--version"], capture_output=True, text=True, encoding="utf-8", check=True)
+    out = subprocess.run(["pandoc", "--version"], capture_output=True, encoding="utf-8", check=True)
     return out.stdout.splitlines()[0]
 
 
@@ -142,40 +160,22 @@ def parse(md):
             continue
         if current is None:
             continue  # preamble before the first H2
-        if inside:
-            current["lines"].append(line)
-            continue
-        # Make in-page links absolute so they survive the split.
-        line = re.sub(r"\]\(#([^)\s]+)\)", lambda x: f"]({URL}#{x.group(1)})", line)
-        c = CAPTION.match(line)
-        out = current["lines"]
-        if c:
-            # Move the caption above its table, where the HTML shows it, so it
-            # cannot read as the start of whatever follows the table.
-            end = len(out)
-            while end and not out[end - 1].strip():
-                end -= 1
-            start = end
-            while start and out[start - 1].startswith("|"):
-                start -= 1
-            if start < end:
-                del out[end:]
-                out[start:start] = [c.group(1), ""]
-                continue
-            line = c.group(1)
-        out.append(line)
+        if not inside:
+            # Make in-page links absolute so they survive the split.
+            line = IN_PAGE_LINK.sub(rf"]({URL}#\1)", line)
+        current["lines"].append(line)
     return blocks, version, last_updated
 
 
 def group_files(blocks):
-    """Group heading blocks into output files."""
+    """Group heading blocks into output files: one per H2, and one per message type."""
     files, h2 = [], None
     for b in blocks:
         if b["level"] == 2:
             h2 = b
-            files.append({"path": [b], "anchor": b["anchor"], "blocks": [b]})
-        elif b["level"] == 3 and h2 and h2["plain"] in SPLIT_H3_UNDER:
-            files.append({"path": [h2, b], "anchor": b["anchor"], "blocks": [b]})
+            files.append({"path": [b], "blocks": [b]})
+        elif b["level"] == 3 and TYPE_HEADING.match(b["plain"]):
+            files.append({"path": [h2, b], "blocks": [b]})
         else:
             files[-1]["blocks"].append(b)
     return files
@@ -183,7 +183,7 @@ def group_files(blocks):
 
 def members_in(text):
     """JSON member names from field tables (the 'Member' column = gpsdecode keys)."""
-    found, col = [], None
+    found, col = {}, None  # dict as an ordered set
     for line in text.splitlines():
         if not line.startswith("|"):
             col = None
@@ -195,9 +195,9 @@ def members_in(text):
             continue
         if col >= 0 and not TABLE_SEP.match(line) and col < len(cells):
             name = cells[col].strip("`")
-            if re.fullmatch(r"[a-z][a-z0-9_]*", name) and name not in found:
-                found.append(name)
-    return found
+            if re.fullmatch(r"[a-z][a-z0-9_]*", name):
+                found[name] = None
+    return list(found)
 
 
 def dac_fid(lines):
@@ -207,24 +207,41 @@ def dac_fid(lines):
     trusted: later prose mentions other FIDs ("... but FID = 31"), and some
     field tables have typos.
     """
-    first = next((l for l in lines if l.startswith("A message ") and DAC_FID.search(l)), "")
-    m = DAC_FID.search(first)
-    if not m:
-        return None
-    dacs = " or ".join(str(int(d)) for d in m.group(1).split(" or "))
-    return f"dac {dacs}, fid {int(m.group(2))}"
+    for l in lines:
+        if l.startswith("A message ") and (m := DAC_FID.search(l)):
+            dacs = " or ".join(str(int(d)) for d in m.group(1).split(" or "))
+            return f"dac {dacs}, fid {int(m.group(2))}"
+    return None
+
+
+def table_cell(xs):
+    """Join markdown into one table cell, escaping only pipes not escaped already."""
+    return re.sub(r"(?<!\\)((?:\\\\)*)\|", r"\1\\|", ", ".join(xs))
 
 
 def render(files, version):
     out = {}
-    index_rows = []
+    idx = [
+        "<!-- generated by scripts/ais/refresh.py; do not edit -->",
+        f"# AIVDM/AIVDO reference index (gpsd doc v{version})",
+        "",
+        "Open only the files a question needs. `Members` are the JSON keys gpsdecode prints.",
+        "The same key appears under many types with different units, so find a decoded",
+        "message's field table by its `type` value in the Section column, not by key.",
+        "Type 6 and 8 subsections are tagged `[dac D, fid F]` from the sentence that",
+        "defines each sub-message; match a decoded `dac`/`fid` against these as integers.",
+        "",
+        "| File | Section | Subsections | Members |",
+        "|---|---|---|---|",
+    ]
     for f in files:
+        head = f["path"][-1]
         # Slug only, no position prefix: an upstream section added or removed
         # must not rename every later file.
-        name = f"{slugify(f['path'][-1]['plain'])}.md"
+        name = f"{slugify(head['plain'])}.md"
         if name in out or name == "index.md":
             sys.exit(f"Duplicate file name {name}; nothing written.")
-        src = f"{URL}#{f['anchor']}" if f["anchor"] else URL
+        src = f"{URL}#{head['anchor']}" if head["anchor"] else URL
         body = []
         for b in f["blocks"]:
             body.append(f"{'#' * b['level']} {b['title']}")
@@ -241,35 +258,16 @@ def render(files, version):
             tag = dac_fid(b["lines"])
             subs.append(f"{b['title']} [{tag}]" if tag else b["title"])
         mem = members_in(text)
-        same = None if mem else SAME_LAYOUT.search(text)
-        if same:
+        if not mem and (same := SAME_LAYOUT.search(text)):
             # Types 11 and 13 have no table of their own, only a pointer to another type.
             mem = [f"same layout as type {same.group(1)}"]
-        index_rows.append((name, f["path"][-1]["title"], subs, mem))
-
-    idx = [
-        "<!-- generated by scripts/ais/refresh.py; do not edit -->",
-        f"# AIVDM/AIVDO reference index (gpsd doc v{version})",
-        "",
-        "Open only the files a question needs. `Members` are the JSON keys gpsdecode prints.",
-        "The same key appears under many types with different units, so find a decoded",
-        "message's field table by its `type` value in the Section column, not by key.",
-        "Type 6 and 8 subsections are tagged `[dac D, fid F]` from the sentence that",
-        "defines each sub-message; match a decoded `dac`/`fid` against these as integers.",
-        "",
-        "| File | Section | Subsections | Members |",
-        "|---|---|---|---|",
-    ]
-    # Cells hold markdown; escape only pipes that are not escaped already.
-    cell = lambda xs: re.sub(r"(?<!\\)((?:\\\\)*)\|", r"\1\\|", ", ".join(xs))
-    for name, title, subs, mem in index_rows:
-        idx.append(f"| {name} | {cell([title])} | {cell(subs)} | {cell(mem)} |")
+        idx.append(f"| {name} | {table_cell([head['title']])} | {table_cell(subs)} | {table_cell(mem)} |")
     out["index.md"] = "\n".join(idx) + "\n"
     return out
 
 
 def fidelity(html, blocks, version, last_updated):
-    """Fail loudly instead of silently dropping content (the defuddle failure mode)."""
+    """Fail loudly instead of silently dropping content."""
     errors = []
     if version is None or last_updated is None:
         errors.append("page footer (Version / Last updated) not recognized")
@@ -287,14 +285,14 @@ def fidelity(html, blocks, version, last_updated):
         m = TYPE_HEADING.match(b["plain"])
         if m:
             types.update(int(n) for n in re.findall(r"\d+", m.group(1)))
-    missing = sorted(set(range(1, 28)) - types)
+    missing = sorted(set(MESSAGE_TYPES) - types)
     if missing:
         errors.append(f"message types missing: {missing}")
     return errors, {"headings": md_heads, "tables": md_tables}
 
 
 def diff_summary(new, refs):
-    paths = [*refs.glob("*.md"), refs / SOURCE_JSON] if refs.exists() else []
+    paths = [*refs.glob("*.md"), refs / SOURCE_JSON]
     old = {p.name: p.read_text(encoding="utf-8") for p in paths if p.is_file()}
     added = sorted(set(new) - set(old))
     removed = sorted(set(old) - set(new))
@@ -307,11 +305,40 @@ def diff_summary(new, refs):
             if keys:
                 changed.append(f"{name} ({', '.join(keys)})")
         elif new[name] != old[name]:
-            d = list(difflib.unified_diff(old[name].splitlines(), new[name].splitlines(), lineterm="", n=0))
-            plus = sum(1 for l in d if l.startswith("+") and not l.startswith("+++"))
-            minus = sum(1 for l in d if l.startswith("-") and not l.startswith("---"))
+            plus = minus = 0
+            sm = difflib.SequenceMatcher(None, old[name].splitlines(), new[name].splitlines())
+            for tag, i1, i2, j1, j2 in sm.get_opcodes():
+                if tag != "equal":
+                    minus += i2 - i1
+                    plus += j2 - j1
             changed.append(f"{name} (+{plus} -{minus})")
     return added, removed, changed
+
+
+def install(files):
+    """Write files into .staging/ and swap it in as references/.
+
+    The old tree is moved to .references-old/ rather than deleted, so a failed
+    swap can be undone; an interrupted run leaves it there for the next one.
+    """
+    if STAGING.exists():
+        shutil.rmtree(STAGING)
+    STAGING.mkdir()
+    for name, text in files.items():
+        (STAGING / name).write_text(text, encoding="utf-8")
+    if REFS.exists():
+        if BACKUP.exists():
+            shutil.rmtree(BACKUP)  # stale: references/ is intact
+        REFS.rename(BACKUP)
+    # BACKUP now holds the old tree, whether moved aside just now or by an interrupted run.
+    try:
+        STAGING.rename(REFS)
+    except OSError:
+        if BACKUP.exists():
+            BACKUP.rename(REFS)
+        raise
+    if BACKUP.exists():
+        shutil.rmtree(BACKUP)
 
 
 def main():
@@ -357,17 +384,18 @@ def main():
     }, indent=2) + "\n"
 
     # references/ missing with a backup present means an --apply was interrupted
-    # mid-swap: the backup is the only copy, so compare against it and restore it.
+    # mid-swap: the backup is the only copy, so compare against it.
     orphan = BACKUP.exists() and not REFS.exists()
     if orphan:
         print("references/ is missing but .references-old/ exists (an interrupted --apply);"
-              " comparing against the backup. --apply restores it first.")
+              " comparing against the backup, which --apply replaces.")
     base = BACKUP if orphan else REFS
     added, removed, changed = diff_summary(files, base)
 
     print(f"gpsd doc v{version}, page last updated {last_updated}")
     print(f"HTML sha256: {sha256}")
-    print(f"Fidelity OK: {counts['headings']} headings, {counts['tables']} tables, types 1-27 present")
+    print(f"Fidelity OK: {counts['headings']} headings, {counts['tables']} tables,"
+          f" types {MESSAGE_TYPES[0]}-{MESSAGE_TYPES[-1]} present")
     print(f"{n_md} files built, plus {SOURCE_JSON}")
     if not (added or removed or changed):
         print(f"No changes against {base.name}/.")
@@ -379,28 +407,7 @@ def main():
         print(f"Dry run; nothing written. Re-run with --apply {sha256} to replace references/.")
         return
 
-    if orphan:
-        BACKUP.rename(REFS)
-        print("Restored references/ from .references-old/.")
-    elif BACKUP.exists():
-        shutil.rmtree(BACKUP)  # stale: references/ is intact
-    if STAGING.exists():
-        shutil.rmtree(STAGING)
-    STAGING.mkdir()
-    for name, text in files.items():
-        (STAGING / name).write_text(text, encoding="utf-8")
-    # Move the old tree aside rather than deleting it, so a failed swap can be undone.
-    had_refs = REFS.exists()
-    if had_refs:
-        REFS.rename(BACKUP)
-    try:
-        STAGING.rename(REFS)
-    except OSError:
-        if had_refs:
-            BACKUP.rename(REFS)
-        raise
-    if had_refs:
-        shutil.rmtree(BACKUP)
+    install(files)
     print(f"Applied: references/ updated, {SOURCE_JSON} included.")
 
 

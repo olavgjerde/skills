@@ -11,7 +11,7 @@
       "name": "ais",
       "source": "./skills/ais",
       "description": "Learn AIS: answers grounded in gpsd's AIVDM/AIVDO protocol reference",
-      "version": "2.0.0",
+      "version": "1.0.0",
       "author": {
         "name": "Olav Gjerde"
       },

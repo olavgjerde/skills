@@ -1,0 +1,30 @@
+{
+  "name": "olavgjerde",
+  "owner": {
+    "name": "Olav Gjerde"
+  },
+  "metadata": {
+    "description": "Olav Gjerde's agent skills, one plugin per skill"
+  },
+  "plugins": [
+    {
+      "name": "ais",
+      "source": "./skills/ais",
+      "description": "Learn AIS: answers grounded in gpsd's AIVDM/AIVDO protocol reference",
+      "version": "1.0.0",
+      "author": {
+        "name": "Olav Gjerde"
+      },
+      "homepage": "https://github.com/olavgjerde/skills/tree/main/skills/ais",
+      "repository": "https://github.com/olavgjerde/skills",
+      "license": "MIT AND BSD-2-Clause",
+      "keywords": [
+        "ais",
+        "aivdm",
+        "nmea",
+        "gpsd",
+        "maritime"
+      ]
+    }
+  ]
+}

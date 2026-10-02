@@ -1,0 +1,60 @@
+name: Refresh AIS references
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Same pandoc as the snapshot, so a refresh only changes what gpsd changed.
+      # Bump it by running scripts/ais/refresh.py locally with a newer pandoc.
+      - name: Install pandoc recorded in SOURCE.json
+        run: |
+          v=$(python3 -c 'import json; print(json.load(open("skills/ais/references/SOURCE.json"))["converter"].split()[1])')
+          curl -fsSL -o "$RUNNER_TEMP/pandoc.deb" "https://github.com/jgm/pandoc/releases/download/$v/pandoc-$v-1-amd64.deb"
+          sudo dpkg -i "$RUNNER_TEMP/pandoc.deb"
+
+      # The snapshot is deterministic, so references/ only changes when the page
+      # did; create-pull-request opens nothing when the tree is clean.
+      - name: Rebuild references
+        shell: bash  # pipefail: a failed refresh must fail the job, not just tee
+        run: |
+          python3 scripts/ais/refresh.py | tee "$RUNNER_TEMP/refresh.txt"
+          # Users stay on the installed version until the version string changes.
+          version=""
+          if [ -n "$(git status --porcelain -- skills/ais/references)" ]; then
+            version=$(python3 scripts/plugin_version.py bump ais)
+          fi
+          {
+            if [ -n "$version" ]; then
+              echo "Bumps the \`ais\` plugin to **$version** so installed copies update."
+              echo
+            fi
+            echo '`scripts/ais/refresh.py` against https://gpsd.io/AIVDM.html:'
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/refresh.txt"
+            echo '```'
+            echo
+            echo 'Review the diff before merging.'
+          } > "$RUNNER_TEMP/pr-body.md"
+
+      - name: Open pull request
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: refresh/ais-references
+          add-paths: |
+            skills/ais/references
+            .claude-plugin/marketplace.json
+          commit-message: Refresh AIS references from gpsd.io
+          title: Refresh AIS references from gpsd.io
+          body-path: ${{ runner.temp }}/pr-body.md

@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # the version check diffs against the base commit
+      # npx skills copies only the skill directory, so each skill carries its own copy of the MIT notice.
+      - name: Skill LICENSE copies match the root LICENSE
+        run: |
+          for f in skills/*/LICENSE; do
+            cmp LICENSE "$f" || { echo "::error file=$f::differs from LICENSE"; exit 1; }
+          done
+      - name: Scripts compile
+        run: python3 -m compileall -q scripts
+      - name: AIS refresh specs
+        run: python3 -m unittest discover -s scripts/ais
+      - name: Plugin version specs
+        run: python3 -m unittest scripts/test_plugin_version.py
+      # Claude Code keeps users on a plugin's version until it changes, so a
+      # changed skill must raise its version in marketplace.json.
+      - name: Changed skills raise their version
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "No base commit to compare with (new branch or force push); skipping."
+            exit 0
+          fi
+          python3 scripts/plugin_version.py check "$BASE"

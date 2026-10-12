@@ -1,8 +1,8 @@
 {
   "url": "https://gpsd.io/AIVDM.html",
   "doc_version": "1.58",
-  "page_last_updated": "2026-09-28 02:51:56 UTC",
-  "html_sha256": "c1395e3c690256150478fa6dd4263bea6d0f93971eebaf8ac22ada607729426e",
+  "page_last_updated": "2026-10-11 03:18:10 UTC",
+  "html_sha256": "ff7ff60d72b4342579e045b2c468e5eec1f43408cd9346d13db5e2abba6c5a69",
   "converter": "pandoc 3.11",
   "headings": 77,
   "tables": 124
